@@ -125,12 +125,16 @@ func errText(err error) string {
 }
 
 // pipeUpgraded copies both ways. When the client finishes first, the backend
-// gets a half-close. When the backend finishes first, the connection to the
-// client stays open (reading and discarding) until the client closes or
-// linger passes, and only then ends with a FIN: Cloud Run's front end drops
-// data it has not yet delivered if the container closes first. WebSocket
-// clients close right after the backend's close frame, so this normally
-// adds no delay.
+// gets a half-close.
+//
+// When the backend finishes first, the end toward the client is careful,
+// because Cloud Run's front end drops data it has not delivered yet when the
+// container closes first, and a socket closed with data still queued can be
+// reset by any late packet from the client:
+//  1. wait until the front end has acknowledged every byte sent;
+//  2. give the client up to linger to close by itself (WebSocket clients do
+//     so right after the backend's close frame, so this is usually instant);
+//  3. send FIN, keep reading until the client closes, then close.
 func pipeUpgraded(client, backend net.Conn, linger time.Duration) pipeStats {
 	var st pipeStats
 	done := make(chan struct{})
@@ -141,14 +145,42 @@ func pipeUpgraded(client, backend net.Conn, linger time.Duration) pipeStats {
 		_, _ = io.Copy(io.Discard, client) // keep reading so close() sends FIN, not RST
 	}()
 	st.down, st.downErr = copyBufErr(client, backend)
-	// Do not close toward the client yet: wait until the client closes
-	// (it has then received everything) or the linger time ends.
-	_ = client.SetReadDeadline(time.Now().Add(linger))
-	<-done
+	waitSendQueueEmpty(client, time.Minute)
+	select {
+	case <-done:
+	case <-time.After(linger):
+	}
 	closeWrite(client)
+	_ = client.SetReadDeadline(time.Now().Add(30 * time.Second))
+	<-done
+	waitSendQueueEmpty(client, 30*time.Second)
 	client.Close()
 	backend.Close()
 	return st
+}
+
+// waitSendQueueEmpty waits (up to max) until the peer has acknowledged all
+// data queued on c. It returns at once where the queue size is unknown.
+func waitSendQueueEmpty(c net.Conn, max time.Duration) {
+	if bc, ok := c.(*bufferedConn); ok {
+		c = bc.Conn
+	}
+	tc, ok := c.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	raw, err := tc.SyscallConn()
+	if err != nil {
+		return
+	}
+	deadline := time.Now().Add(max)
+	for time.Now().Before(deadline) {
+		n, known := 0, false
+		if raw.Control(func(fd uintptr) { n, known = sendQueueLen(fd) }) != nil || !known || n == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func isHopHeader(k string) bool {
