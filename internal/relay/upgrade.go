@@ -111,26 +111,43 @@ func (s *Server) serveUpgrade(w http.ResponseWriter, r *http.Request, rt *route,
 		conn.Close()
 		return
 	}
-	pipeUpgraded(&bufferedConn{Conn: client, r: cbrw.Reader}, &bufferedConn{Conn: conn, r: br})
+	start := time.Now()
+	st := pipeUpgraded(&bufferedConn{Conn: client, r: cbrw.Reader}, &bufferedConn{Conn: conn, r: br})
+	s.log.Debug("upgrade closed", "route", rt.Prefix, "bytes_down", st.down, "down_end", errText(st.downErr),
+		"bytes_up", st.up, "up_end", errText(st.upErr), "ms", time.Since(start).Milliseconds())
+}
+
+type pipeStats struct {
+	up, down       int64
+	upErr, downErr error
+}
+
+func errText(err error) string {
+	if err == nil {
+		return "eof"
+	}
+	return err.Error()
 }
 
 // pipeUpgraded copies both ways. When the backend finishes, the client gets
 // a half-close and is drained for up to upgradeDrain before the socket is
 // closed; when the client finishes first, the backend gets a half-close.
-func pipeUpgraded(client, backend net.Conn) {
+func pipeUpgraded(client, backend net.Conn) pipeStats {
+	var st pipeStats
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		copyBuf(backend, client) // ends on client EOF or a backend write error
+		st.up, st.upErr = copyBufErr(backend, client) // ends on client EOF or a backend write error
 		closeWrite(backend)
 		_, _ = io.Copy(io.Discard, client) // keep reading so close() sends FIN, not RST
 	}()
-	copyBuf(client, backend)
+	st.down, st.downErr = copyBufErr(client, backend)
 	closeWrite(client)
 	_ = client.SetReadDeadline(time.Now().Add(upgradeDrain))
 	<-done
 	client.Close()
 	backend.Close()
+	return st
 }
 
 func isHopHeader(k string) bool {

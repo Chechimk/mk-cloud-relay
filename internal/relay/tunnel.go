@@ -141,10 +141,14 @@ func Pipe(a, b net.Conn, halfClose bool) (int64, int64) {
 }
 
 func copyBuf(dst io.Writer, src io.Reader) int64 {
+	n, _ := copyBufErr(dst, src)
+	return n
+}
+
+func copyBufErr(dst io.Writer, src io.Reader) (int64, error) {
 	buf := bufPool.Get()
 	defer bufPool.Put(buf)
-	n, _ := io.CopyBuffer(dst, src, buf)
-	return n
+	return io.CopyBuffer(dst, src, buf)
 }
 
 func closeWrite(c net.Conn) bool {

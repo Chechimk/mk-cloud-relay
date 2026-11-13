@@ -118,13 +118,17 @@ type graceBody struct {
 	io.ReadCloser
 	s     *Server
 	route string
+	n     int64
 }
 
 func (b *graceBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
-	if err != nil && err != io.EOF {
-		b.s.log.Debug("backend stream ended with an error; closing cleanly", "route", b.route, "error", err.Error())
-		err = io.EOF
+	b.n += int64(n)
+	if err != nil {
+		b.s.log.Debug("backend body ended", "route", b.route, "bytes", b.n, "end", errText(err))
+		if err != io.EOF {
+			err = io.EOF
+		}
 	}
 	return n, err
 }
