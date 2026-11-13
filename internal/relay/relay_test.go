@@ -654,7 +654,7 @@ func TestUpgradeEndDeliversEverythingToSlowClient(t *testing.T) {
 		conn.(*net.TCPConn).CloseWrite() // finished sending
 		time.Sleep(10 * time.Second)
 	}))
-	r := startRelay(t, map[string]string{"ROUTES": "/ws=http://" + b})
+	r := startRelay(t, map[string]string{"ROUTES": "/ws=http://" + b, "STREAM_LINGER": "1s"})
 	c, err := net.Dial("tcp", r)
 	if err != nil {
 		t.Fatal(err)
@@ -704,4 +704,31 @@ func TestUpgradeEndDeliversEverythingToSlowClient(t *testing.T) {
 func isTimeout(err error) bool {
 	ne, ok := err.(net.Error)
 	return ok && ne.Timeout()
+}
+
+// The backend finishes while the client's HTTP/2 request body is still open:
+// the response must end within STREAM_LINGER, not wait for the client.
+func TestResponseEndsWhileClientStillSending(t *testing.T) {
+	b := startBackend(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Write([]byte("reply"))
+	}))
+	r := startRelay(t, map[string]string{"DEFAULT_TARGET": b, "STREAM_LINGER": "1s"})
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	req, _ := http.NewRequest("POST", "http://"+r+"/svc/Tun", pr)
+	req.Header.Set("Content-Type", "application/grpc")
+	go pw.Write([]byte("first message, then nothing more"))
+	start := time.Now()
+	resp, err := h2cClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil || string(got) != "reply" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("response took %v to end; the relay waited for the client", d)
+	}
 }

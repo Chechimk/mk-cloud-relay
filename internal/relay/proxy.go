@@ -10,7 +10,6 @@ import (
 	"net/http/httputil"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Chechimk/mk-cloud-relay/internal/config"
@@ -83,66 +82,100 @@ func (s *Server) reverseProxy(rt *route) http.Handler {
 			s.serveUpgrade(w, r, rt, scheme, tlsConf)
 			return
 		}
-		body := &lingerBody{rc: r.Body}
+		if r.Body == nil || r.Body == http.NoBody {
+			rp.ServeHTTP(w, r)
+			return
+		}
+		body := newLingerBody(r.Body)
 		r.Body = body
 		rp.ServeHTTP(w, r)
 		body.linger(s.cfg.StreamLinger)
 	})
 }
 
-// lingerBody wraps the client's request body. The transport closes the body
-// when the backend finishes, but closing an HTTP/2 stream that the client is
-// still sending on makes Go send RST_STREAM, and Cloud Run's front end then
-// drops response data it has not delivered yet. So Close only marks the body
-// closed, and linger waits (up to a limit) for the client to finish sending
-// before the handler returns.
+// lingerBody wraps the client's request body.
+//
+// When the backend finishes, the transport closes the request body. Closing
+// an HTTP/2 stream that the client is still sending on makes Go's server send
+// RST_STREAM, and Cloud Run's front end then drops response data it has not
+// delivered yet. So Close only ends what the transport sees (a pending Read
+// returns at once), while a background reader keeps draining the client's
+// stream; linger waits up to a limit for the client to finish before the
+// handler returns.
 type lingerBody struct {
-	rc     io.ReadCloser
-	mu     sync.Mutex // serializes reads of rc
-	closed atomic.Bool
-	done   atomic.Bool // rc returned EOF or an error
+	rc        io.ReadCloser
+	startOnce sync.Once
+	closeOnce sync.Once
+	chunks    chan []byte   // data read from rc, handed to Read
+	failed    chan error    // rc's final error (io.EOF on a clean end)
+	closed    chan struct{} // Close was called
+	ended     chan struct{} // rc returned an error; the reader has exited
+	pending   []byte
+}
+
+func newLingerBody(rc io.ReadCloser) *lingerBody {
+	return &lingerBody{
+		rc:     rc,
+		chunks: make(chan []byte),
+		failed: make(chan error, 1),
+		closed: make(chan struct{}),
+		ended:  make(chan struct{}),
+	}
+}
+
+func (b *lingerBody) start() { b.startOnce.Do(func() { go b.pump() }) }
+
+func (b *lingerBody) pump() {
+	defer close(b.ended)
+	for {
+		buf := make([]byte, 32<<10)
+		n, err := b.rc.Read(buf)
+		if n > 0 {
+			select {
+			case b.chunks <- buf[:n]:
+			case <-b.closed: // the backend is done; discard
+			}
+		}
+		if err != nil {
+			b.failed <- err
+			return
+		}
+	}
 }
 
 func (b *lingerBody) Read(p []byte) (int, error) {
-	if b.closed.Load() {
+	if len(b.pending) > 0 {
+		n := copy(p, b.pending)
+		b.pending = b.pending[n:]
+		return n, nil
+	}
+	b.start()
+	select {
+	case c := <-b.chunks:
+		n := copy(p, c)
+		b.pending = c[n:]
+		return n, nil
+	case err := <-b.failed:
+		b.failed <- err // keep it for later reads
+		return 0, err
+	case <-b.closed:
 		return 0, io.EOF
 	}
-	return b.read(p)
-}
-
-func (b *lingerBody) read(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	n, err := b.rc.Read(p)
-	if err != nil {
-		b.done.Store(true)
-	}
-	return n, err
 }
 
 func (b *lingerBody) Close() error {
-	b.closed.Store(true)
+	b.closeOnce.Do(func() { close(b.closed) })
 	return nil
 }
 
 func (b *lingerBody) linger(max time.Duration) {
-	if b.done.Load() || max <= 0 || b.rc == http.NoBody {
-		_ = b.rc.Close()
-		return
-	}
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		buf := make([]byte, 16<<10)
-		for {
-			if _, err := b.read(buf); err != nil {
-				return
-			}
+	_ = b.Close()
+	if max > 0 {
+		b.start()
+		select {
+		case <-b.ended:
+		case <-time.After(max):
 		}
-	}()
-	select {
-	case <-finished:
-	case <-time.After(max):
 	}
 	_ = b.rc.Close()
 }
