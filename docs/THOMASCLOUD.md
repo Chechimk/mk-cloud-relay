@@ -19,6 +19,6 @@ h2c and HTTP/1.1 on the same port (gRPC and WebSocket in one service),
 per-path routing to several backends, and authenticated TCP tunnels.
 
 ## Migrating
-`PROXY_TARGETS=34.63.66.185:80` keeps working as a single catch-all backend.
+`PROXY_TARGETS=203.0.113.10:80` keeps working as a single catch-all backend.
 Remove `KEY_TARGETS`. Then switch the service's source to this repository, or
 deploy a new service and move clients over after testing.

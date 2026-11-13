@@ -69,7 +69,7 @@ func TestParseRouteErrors(t *testing.T) {
 
 func TestFromEnv(t *testing.T) {
 	c, err := FromEnv(env(map[string]string{
-		"PROXY_TARGETS": "34.63.66.185:80",
+		"PROXY_TARGETS": "203.0.113.10:80",
 		"ROUTES":        "/grpc/=h2c://b:1",
 		"DIAL_TIMEOUT":  "3",
 		"IDLE_TIMEOUT":  "2m",
@@ -80,7 +80,7 @@ func TestFromEnv(t *testing.T) {
 	if c.Port != "8080" || c.DialTimeout != 3*time.Second || c.IdleTimeout != 2*time.Minute {
 		t.Errorf("defaults: %+v", c)
 	}
-	if c.Routes[0].Prefix != "/grpc/" || c.Routes[1].Prefix != "/" || c.Routes[1].Addr != "34.63.66.185:80" {
+	if c.Routes[0].Prefix != "/grpc/" || c.Routes[1].Prefix != "/" || c.Routes[1].Addr != "203.0.113.10:80" {
 		t.Errorf("routes not sorted longest first: %+v", c.Routes)
 	}
 }

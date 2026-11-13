@@ -137,7 +137,7 @@ add `strip`, and unmatched paths get a plain 404.
 
 Example:
 ```
-ROUTES=/49qwp74u/=http://34.63.66.185:80; /xh=http://34.63.66.185:8080; /t/proxy=tunnel://34.63.66.185:3128
+ROUTES=/grpcsvc/=http://203.0.113.10:80; /xh=http://203.0.113.10:8080; /t/proxy=tunnel://203.0.113.10:3128
 ```
 
 ### All variables

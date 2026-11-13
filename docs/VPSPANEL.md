@@ -16,7 +16,7 @@ In VPSPanel → Xray manager → Add inbound:
 
 Then add a route with the inbound's path (or `/<serviceName>/` for gRPC):
 ```
-ROUTES=/49qwp74u/=http://VPS_IP:80; /xh=http://VPS_IP:8080
+ROUTES=/grpcsvc/=http://VPS_IP:80; /xh=http://VPS_IP:8080
 ```
 Several inbounds on different ports can share one relay through different paths.
 
