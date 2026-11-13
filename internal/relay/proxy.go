@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -43,44 +44,100 @@ func (s *Server) reverseProxy(rt *route) http.Handler {
 		h1 = s.tlsTransport(rt)
 	}
 	pick := func(r *http.Request) http.RoundTripper {
-		if h1 == nil || (h2 != nil && isGRPC(r) && r.Header.Get("Upgrade") == "") {
+		if h1 == nil || (h2 != nil && isGRPC(r)) {
 			return h2
 		}
 		return h1
 	}
-	return &httputil.ReverseProxy{
+	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL.Scheme = scheme
-			pr.Out.URL.Host = rt.Addr
-			if rt.StripPrefix {
-				pr.Out.URL.Path = ensureSlash(strings.TrimPrefix(pr.In.URL.Path, rt.Prefix))
-				if pr.In.URL.RawPath != "" {
-					pr.Out.URL.RawPath = ensureSlash(strings.TrimPrefix(pr.In.URL.RawPath, rt.Prefix))
-				}
-			}
-			switch {
-			case rt.HostFromTarget:
-				pr.Out.Host = rt.Addr
-			case rt.HostHeader != "":
-				pr.Out.Host = rt.HostHeader
-			default:
-				pr.Out.Host = pr.In.Host
-			}
+			applyRoute(rt, scheme, pr.In, pr.Out)
 			if rt.XForwarded {
-				if v := pr.In.Header["X-Forwarded-For"]; len(v) > 0 {
-					pr.Out.Header["X-Forwarded-For"] = append([]string(nil), v...)
-				}
 				pr.SetXForwarded()
 			}
 		},
-		Transport:     roundTripperFunc(func(r *http.Request) (*http.Response, error) { return pick(r).RoundTrip(r) }),
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) { return pick(r).RoundTrip(r) }),
+		// End the client's response cleanly even if the backend resets the
+		// stream at the very end. An abort (RST_STREAM, or a connection
+		// closed mid-chunk) makes Cloud Run's front end discard data it has
+		// already received but not yet delivered to a slower client.
+		ModifyResponse: func(resp *http.Response) error {
+			if resp.StatusCode != http.StatusSwitchingProtocols {
+				resp.Body = &graceBody{ReadCloser: resp.Body, s: s, route: rt.Prefix}
+			}
+			return nil
+		},
 		FlushInterval: -1, // write every chunk immediately: no buffering of streams
 		BufferPool:    bufPool,
-		ErrorLog:      nil,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			s.proxyError(w, r, rt, err)
 		},
 	}
+	var tlsConf *tls.Config
+	if t, ok := h1.(*http.Transport); ok && rt.Kind == config.KindTLS {
+		tlsConf = t.TLSClientConfig
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 1 && r.Header.Get("Upgrade") != "" && headerHasToken(r.Header, "Connection", "upgrade") {
+			s.serveUpgrade(w, r, rt, scheme, tlsConf)
+			return
+		}
+		rp.ServeHTTP(w, r)
+	})
+}
+
+// applyRoute points out at the route's backend: same path and query (unless
+// strip), and the Host header chosen by the route options.
+func applyRoute(rt *route, scheme string, in, out *http.Request) {
+	out.URL.Scheme = scheme
+	out.URL.Host = rt.Addr
+	if rt.StripPrefix {
+		out.URL.Path = ensureSlash(strings.TrimPrefix(in.URL.Path, rt.Prefix))
+		if in.URL.RawPath != "" {
+			out.URL.RawPath = ensureSlash(strings.TrimPrefix(in.URL.RawPath, rt.Prefix))
+		}
+	}
+	switch {
+	case rt.HostFromTarget:
+		out.Host = rt.Addr
+	case rt.HostHeader != "":
+		out.Host = rt.HostHeader
+	default:
+		out.Host = in.Host
+	}
+	if rt.XForwarded {
+		if v := in.Header["X-Forwarded-For"]; len(v) > 0 {
+			out.Header["X-Forwarded-For"] = append([]string(nil), v...)
+		}
+	}
+}
+
+// graceBody turns a backend read error after the response has started into a
+// normal end of stream.
+type graceBody struct {
+	io.ReadCloser
+	s     *Server
+	route string
+}
+
+func (b *graceBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && err != io.EOF {
+		b.s.log.Debug("backend stream ended with an error; closing cleanly", "route", b.route, "error", err.Error())
+		err = io.EOF
+	}
+	return n, err
+}
+
+func headerHasToken(h http.Header, name, token string) bool {
+	for _, v := range h.Values(name) {
+		for _, t := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(t), token) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, rt *route, err error) {

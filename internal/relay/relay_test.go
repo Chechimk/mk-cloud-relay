@@ -608,3 +608,100 @@ func TestConcurrentStreams(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// A backend that resets its stream right after the last byte (as Xray's gRPC
+// and XHTTP servers sometimes do) must still give the client a clean end, so
+// front ends like Cloud Run deliver everything they have buffered.
+func TestBackendResetAfterDataEndsCleanly(t *testing.T) {
+	payload := randBytes(3 << 20)
+	b := startBackend(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", r.Header.Get("Content-Type"))
+		w.Write(payload)
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler) // RST_STREAM on h2, abrupt close on HTTP/1.1
+	}))
+	r := startRelay(t, map[string]string{"ROUTES": "/h1/=http://" + b + "; /h2/=h2c://" + b})
+	for _, c := range []struct {
+		path   string
+		client *http.Client
+	}{{"/h1/x", h1Client()}, {"/h2/x", h2cClient()}} {
+		resp, err := c.client.Get("http://" + r + c.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || !bytes.Equal(got, payload) {
+			t.Errorf("%s: got %d bytes, err %v (want a clean end after %d bytes)", c.path, len(got), err, len(payload))
+		}
+	}
+}
+
+// When the backend of an upgraded connection finishes while the client is
+// still sending, a client that reads late must still receive every byte and a
+// normal close (FIN), not a reset that throws away buffered data.
+func TestUpgradeEndDeliversEverythingToSlowClient(t *testing.T) {
+	payload := randBytes(8 << 20)
+	b := startBackend(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		go io.Copy(io.Discard, conn) // ignores what the client sends
+		fmt.Fprint(conn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		conn.Write(payload)
+		conn.(*net.TCPConn).CloseWrite() // finished sending
+		time.Sleep(10 * time.Second)
+	}))
+	r := startRelay(t, map[string]string{"ROUTES": "/ws=http://" + b})
+	c, err := net.Dial("tcp", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprint(c, "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() { // keep uploading so the relay always has unread client data
+		junk := make([]byte, 4096)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			c.SetWriteDeadline(time.Now().Add(time.Second))
+			if _, err := c.Write(junk); err != nil && !isTimeout(err) {
+				return
+			}
+		}
+	}()
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != 101 {
+		t.Fatalf("upgrade: %v %v", resp, err)
+	}
+	time.Sleep(500 * time.Millisecond) // let the backend finish while we have not read anything
+	c.SetReadDeadline(time.Now().Add(30 * time.Second))
+	var got bytes.Buffer
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := br.Read(buf)
+		got.Write(buf[:n])
+		if err != nil {
+			if err != io.EOF {
+				t.Fatalf("after %d bytes: %v (want EOF)", got.Len(), err)
+			}
+			break
+		}
+	}
+	if !bytes.Equal(got.Bytes(), payload) {
+		t.Fatalf("got %d of %d bytes", got.Len(), len(payload))
+	}
+}
+
+func isTimeout(err error) bool {
+	ne, ok := err.(net.Error)
+	return ok && ne.Timeout()
+}

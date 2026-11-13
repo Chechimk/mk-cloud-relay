@@ -87,18 +87,18 @@ func TestFromEnv(t *testing.T) {
 
 func TestFromEnvSafety(t *testing.T) {
 	cases := map[string]map[string]string{
-		"nothing configured":         {},
-		"tunnel without token":       {"ROUTES": "/t=tunnel://a:1"},
-		"short global token":         {"ROUTES": "/t=tunnel://a:1", "TUNNEL_TOKENS": "short"},
-		"open forward proxy":         {"FORWARD_PROXY_UPSTREAM": "http://p:3128"},
-		"weak forward password":      {"FORWARD_PROXY_UPSTREAM": "http://p:3128", "FORWARD_PROXY_USERS": "a:b"},
-		"https forward upstream":     {"FORWARD_PROXY_UPSTREAM": "https://p:3128", "FORWARD_PROXY_USERS": "a:12345678"},
-		"duplicate prefix":           {"ROUTES": "/a=b:1;/a=c:1"},
-		"default target plus slash":  {"ROUTES": "/=b:1", "DEFAULT_TARGET": "c:1"},
-		"several default targets":    {"DEFAULT_TARGET": "b:1,c:1"},
-		"bad port":                   {"PORT": "x", "DEFAULT_TARGET": "b:1"},
-		"bad log level":              {"LOG_LEVEL": "loud", "DEFAULT_TARGET": "b:1"},
-		"bad duration":               {"DIAL_TIMEOUT": "-5s", "DEFAULT_TARGET": "b:1"},
+		"nothing configured":        {},
+		"tunnel without token":      {"ROUTES": "/t=tunnel://a:1"},
+		"short global token":        {"ROUTES": "/t=tunnel://a:1", "TUNNEL_TOKENS": "short"},
+		"open forward proxy":        {"FORWARD_PROXY_UPSTREAM": "http://p:3128"},
+		"weak forward password":     {"FORWARD_PROXY_UPSTREAM": "http://p:3128", "FORWARD_PROXY_USERS": "a:b"},
+		"https forward upstream":    {"FORWARD_PROXY_UPSTREAM": "https://p:3128", "FORWARD_PROXY_USERS": "a:12345678"},
+		"duplicate prefix":          {"ROUTES": "/a=b:1;/a=c:1"},
+		"default target plus slash": {"ROUTES": "/=b:1", "DEFAULT_TARGET": "c:1"},
+		"several default targets":   {"DEFAULT_TARGET": "b:1,c:1"},
+		"bad port":                  {"PORT": "x", "DEFAULT_TARGET": "b:1"},
+		"bad log level":             {"LOG_LEVEL": "loud", "DEFAULT_TARGET": "b:1"},
+		"bad duration":              {"DIAL_TIMEOUT": "-5s", "DEFAULT_TARGET": "b:1"},
 	}
 	for name, m := range cases {
 		if _, err := FromEnv(env(m)); err == nil {

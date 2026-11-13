@@ -71,9 +71,9 @@ type Config struct {
 // FromEnv builds a Config from environment lookups (os.Getenv in production).
 func FromEnv(get func(string) string) (*Config, error) {
 	c := &Config{
-		Port:        firstNonEmpty(get("PORT"), "8080"),
-		LogLevel:    strings.ToLower(firstNonEmpty(get("LOG_LEVEL"), "info")),
-		HealthPath:  get("HEALTH_PATH"),
+		Port:         firstNonEmpty(get("PORT"), "8080"),
+		LogLevel:     strings.ToLower(firstNonEmpty(get("LOG_LEVEL"), "info")),
+		HealthPath:   get("HEALTH_PATH"),
 		ForwardUsers: map[string]string{},
 	}
 	var err error
