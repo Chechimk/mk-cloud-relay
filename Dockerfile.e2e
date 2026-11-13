@@ -3,7 +3,7 @@
 # for a disposable Cloud Run test service. Never use it in production.
 #
 # Build from the repository root:
-#   docker build -f tests/e2e/Dockerfile -t mk-cloud-relay-e2e .
+#   docker build -f Dockerfile.e2e -t mk-cloud-relay-e2e .
 FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./

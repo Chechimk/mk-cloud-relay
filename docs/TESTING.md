@@ -13,7 +13,7 @@ docker run --rm -v "$PWD":/src -w /src golang:1.25 go test -race ./...
 ```bash
 tests/e2e/run.sh local
 ```
-This builds `tests/e2e/Dockerfile`, a **test-only** image containing the relay,
+This builds `Dockerfile.e2e`, a **test-only** image containing the relay,
 Xray-core (pinned release, verified by its published SHA-256), and a small web
 server. It then runs 13 Xray transport cases, the tunnel, the forward proxy,
 security checks, a parallel run and a backend-failure check. Each Xray case
@@ -29,12 +29,16 @@ runs locally in Docker.
    ```
 2. Deploy the test image to a **new** service (Cloud Shell or any machine with gcloud):
    ```bash
-   cp tests/e2e/Dockerfile Dockerfile      # local copy only; do not commit
+   cp Dockerfile.e2e Dockerfile      # local copy only; do not commit
    gcloud run deploy mk-relay-e2e --source . --region europe-west1 \
        --port 8080 --timeout 3600 --concurrency 1000 --no-use-http2 \
        --allow-unauthenticated --set-env-vars E2E_UUID=$E2E_UUID,E2E_SECRET=$E2E_SECRET
    git checkout Dockerfile
    ```
+   In the console instead: Create service → Continuously deploy from a
+   repository → Cloud Build → this repository, branch `^main$`, build type
+   Dockerfile, source location `/Dockerfile.e2e`. Then add the two variables,
+   port 8080, timeout 3600, and leave HTTP/2 end-to-end off.
 3. Run the checks:
    ```bash
    tests/e2e/run.sh cloud https://mk-relay-e2e-XXXX.europe-west1.run.app

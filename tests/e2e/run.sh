@@ -15,7 +15,7 @@ IMAGE=mk-cloud-relay-e2e
 NET=mkrelay-e2e
 mode=${1:-local}
 
-docker build -q -f tests/e2e/Dockerfile -t "$IMAGE" . >/dev/null
+docker build -q -f Dockerfile.e2e -t "$IMAGE" . >/dev/null
 cleanup() { docker rm -f mkrelay-server mkrelay-client >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup

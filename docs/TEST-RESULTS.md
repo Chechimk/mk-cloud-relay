@@ -69,4 +69,4 @@ mode, finish immediately.
 ## 3. Google Cloud Run
 
 Pending. These results come from a disposable test service built from
-`tests/e2e/Dockerfile`, using the procedure in [TESTING.md](TESTING.md).
+`Dockerfile.e2e`, using the procedure in [TESTING.md](TESTING.md).
