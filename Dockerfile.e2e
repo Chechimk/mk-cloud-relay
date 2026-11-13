@@ -30,5 +30,6 @@ COPY tests/e2e/gen-client.sh tests/e2e/check.sh /usr/local/bin/
 RUN chmod +x /start.sh /www/cgi-bin/sha /usr/local/bin/gen-client.sh /usr/local/bin/check.sh
 ENV ROUTES="/vg/=http://127.0.0.1:10001;/mg/=h2c://127.0.0.1:10002;/vx=http://127.0.0.1:10003;/vw=http://127.0.0.1:10004;/mw=http://127.0.0.1:10005;/tw=http://127.0.0.1:10006;/vh=http://127.0.0.1:10007;/tg/=http://127.0.0.1:10008;/t/proxy=tunnel://127.0.0.1:3128" \
     HEALTH_PATH="/_mk/health" \
-    LOG_LEVEL="debug" \n    LOG_REQUESTS="true"
+    LOG_LEVEL="debug" \
+    LOG_REQUESTS="true"
 ENTRYPOINT ["/start.sh"]
