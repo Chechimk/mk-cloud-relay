@@ -37,36 +37,52 @@ client ──HTTPS / h2──▶  ┌──────────────�
 
 ## What works where
 
-| Traffic | Relay | Cloud Run | Notes |
-|---|---|---|---|
-| HTTP/1.1 reverse proxy | yes | yes | streaming, no buffering |
-| HTTP/2 from clients | yes | yes | Cloud Run speaks h2 to clients |
-| gRPC (unary + bidirectional streaming, trailers) | yes | see [results](docs/TEST-RESULTS.md) | backend over h2c |
-| WebSocket (VLESS/VMess/Trojan WS, SSH-WS) | yes | see results | HTTP/2 end-to-end must be **off** |
-| HTTPUpgrade (Xray) | yes | see results | same as WebSocket |
-| XHTTP packet-up | yes | see results | works over HTTP/1.1 and h2 |
-| XHTTP stream-up / stream-one | yes | see results | need streaming uploads from the platform |
-| TCP over WebSocket tunnel (`tunnel://`) | yes | see results | carries HTTP proxy CONNECT, SSH, … |
-| HTTP forward proxy (`GET http://…` to the relay) | yes | depends on front end | through `FORWARD_PROXY_UPSTREAM` |
-| HTTPS `CONNECT` sent directly to the relay | yes | **no** | Cloud Run rejects the CONNECT method; use a tunnel |
-| Raw TCP, UDP, QUIC, Hysteria2, SOCKS5 directly | no | no | Cloud Run accepts only HTTP; TCP works via a tunnel, UDP does not |
+All on **one Cloud Run service and one domain**, HTTP/2 end-to-end **off**:
 
-"Relay: yes" means it is verified by automated tests with real Xray-core
-traffic in Docker. The Cloud Run column is filled from live tests in
+| Traffic | Local Docker | Cloud Run | Notes |
+|---|---|---|---|
+| VLESS / VMess / Trojan + gRPC (gun and multi) | verified | **verified** | client `alpn=h2`; Cloud Run passes gRPC to the container as h2c |
+| VLESS + XHTTP stream-one, stream-up, packet-up | verified | **verified** (over h2) | client `alpn=h2` |
+| VLESS + XHTTP over HTTP/1.1 | verified | not working | Xray's client negotiates HTTP/2 over TLS anyway; use `alpn=h2` |
+| VLESS / VMess / Trojan + WebSocket | verified | **verified** | client `alpn=http/1.1` |
+| VLESS + HTTPUpgrade | verified | **verified** | client `alpn=http/1.1` |
+| TCP tunnel (`tunnel://`) to an HTTP proxy: HTTP and HTTPS CONNECT | verified | **verified** | with `mk-cloud-relay client` |
+| Parallel streams (11-13 transports at once) | verified | **verified** | 20 MB each, hashes checked |
+| Long-lived connections | – | **verified** (205 s, WS and gRPC) | possible up to the 60-minute request timeout |
+| HTTP reverse proxy to plain websites/APIs | unit tests | not separately tested | same code path as the cases above |
+| HTTP forward proxy sent straight to the relay | verified | **not possible** | Cloud Run answers `CONNECT` and `GET http://other-host/` itself (404) |
+| Raw TCP, UDP, QUIC, Hysteria2, SOCKS5 directly | no | no | Cloud Run accepts only HTTP; TCP works through a tunnel, UDP does not |
+
+"Verified" means real data was moved and checked with SHA-256 in both
+directions: 20 MB down and 5 MB up per case. See
 [docs/TEST-RESULTS.md](docs/TEST-RESULTS.md).
 
-### Cloud Run facts this design relies on
-From the official Cloud Run documentation:
-- By default Cloud Run downgrades requests to HTTP/1 for the container, **except
-  native gRPC traffic, which still arrives as HTTP/2 cleartext (h2c)**. The
-  relay accepts both on one port, so one service can carry gRPC and WebSocket
-  together.
-- With "HTTP/2 end-to-end" on, everything arrives as h2c and **WebSockets are
-  not supported**. Keep it off unless a route needs streaming that only works
-  over h2.
-- Cloud Run does not pass `CONNECT` or `TRACE` requests to containers.
+### How Cloud Run behaves, and what the relay does about it
+- By default Cloud Run turns requests into HTTP/1.1 for the container, except
+  native gRPC, which arrives as HTTP/2 cleartext (h2c). The relay accepts both
+  on one port, so gRPC, WebSocket, XHTTP and tunnels share one service.
+  (thomascloud fails here: it cannot read h2c.)
+- With "HTTP/2 end-to-end" on, everything arrives as h2c, and Google documents
+  that WebSockets do not work then. Keep it off. This mode was not tested here.
+- Cloud Run never passes `CONNECT`, `TRACE` or absolute-form proxy requests to
+  the container; its front end routes by Host and answers them itself.
+- **Measured: Cloud Run's front end drops data it has not delivered yet when
+  the container ends a connection or stream first.** The relay logged 20 MB
+  sent with a clean end while clients received 13-15 MB. So the relay never
+  ends first:
+  - WebSocket: after the backend's close frame, it waits for the client to
+    close (it does once it has everything), up to 5 minutes;
+  - HTTPUpgrade and HTTP/2 streams: it waits up to `STREAM_LINGER` (30 s) for
+    the client;
+  - tunnels: it sends an end marker and waits for the client to close;
+  - before any FIN, it waits until the front end has acknowledged every byte.
+  The cost: when the inner application never closes by itself, the
+  connection closes up to `STREAM_LINGER` later. The data itself is not
+  delayed.
+- XHTTP packet-up and stream-up use several HTTP requests per session. Behind
+  a shared backend (your VPS) that is fine with any number of instances.
 - Every request, WebSocket included, ends at the request timeout (maximum 60
-  minutes). Clients must reconnect; Xray and the tunnel client do this.
+  minutes). Xray and the tunnel client reconnect.
 
 ## Quick start on Cloud Run
 
@@ -144,6 +160,7 @@ ROUTES=/49qwp74u/=http://34.63.66.185:80; /xh=http://34.63.66.185:8080; /t/proxy
 | `BACKEND_IDLE_TIMEOUT` | 90s | idle pooled backend connections |
 | `TCP_KEEPALIVE` | 30s | TCP keepalive toward backends |
 | `WS_PING_INTERVAL` | 25s | WebSocket ping on tunnels; keeps mobile/NAT paths alive (0 = off) |
+| `STREAM_LINGER` | 30s | how long to wait for a client that is still connected after the backend finished (HTTPUpgrade, HTTP/2 and streaming requests), so Cloud Run delivers everything; 0 = close at once |
 | `MAX_CONCURRENT_STREAMS` | 1000 | HTTP/2 streams per connection |
 
 Durations accept `30`, `30s` or `2m`. Run `mk-cloud-relay check-config` to
@@ -159,7 +176,7 @@ TLS), on a public port, and route its path through the relay:
 | Xray inbound (server) | Route | Client link changes |
 |---|---|---|
 | VLESS/VMess/Trojan + gRPC, serviceName `abc` | `/abc/=http://VPS:PORT` | `security=tls`, `alpn=h2` |
-| VLESS + XHTTP, path `/xh` | `/xh=http://VPS:PORT` | `security=tls`; `alpn=h2` for stream-one/stream-up |
+| VLESS + XHTTP, path `/xh` | `/xh=http://VPS:PORT` | `security=tls`, `alpn=h2` (all modes) |
 | VLESS/VMess/Trojan + WebSocket, path `/ws` | `/ws=http://VPS:PORT` | `security=tls`, `alpn=http/1.1` |
 | VLESS + HTTPUpgrade, path `/hu` | `/hu=http://VPS:PORT` | `security=tls`, `alpn=http/1.1` |
 

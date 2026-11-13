@@ -31,7 +31,7 @@ runs locally in Docker.
    ```bash
    cp Dockerfile.e2e Dockerfile      # local copy only; do not commit
    gcloud run deploy mk-relay-e2e --source . --region europe-west1 \
-       --port 8080 --timeout 3600 --concurrency 1000 --no-use-http2 \
+       --port 8080 --timeout 3600 --concurrency 1000 --no-use-http2 --max-instances 1 \
        --allow-unauthenticated --set-env-vars E2E_UUID=$E2E_UUID,E2E_SECRET=$E2E_SECRET
    git checkout Dockerfile
    ```
@@ -46,6 +46,10 @@ runs locally in Docker.
 4. Optionally deploy a second copy with `--use-http2` to compare the two modes.
 5. Delete the test services:
    `gcloud run services delete mk-relay-e2e --region europe-west1`.
+
+`--max-instances 1` matters only for this test image: Xray runs inside each
+instance, so XHTTP requests of one session must reach the same instance. With
+a real backend on a VPS, all instances reach the same Xray.
 
 The test service is a working proxy for anyone who knows `E2E_UUID` or
 `E2E_SECRET`, so use fresh random values and delete it after testing.
