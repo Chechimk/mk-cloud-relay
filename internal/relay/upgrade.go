@@ -107,14 +107,23 @@ func (s *Server) serveUpgrade(w http.ResponseWriter, r *http.Request, rt *route,
 		return
 	}
 	start := time.Now()
-	st := pipeUpgraded(&bufferedConn{Conn: client, r: cbrw.Reader}, &bufferedConn{Conn: conn, r: br}, s.cfg.StreamLinger)
+	// A real WebSocket answer carries Sec-WebSocket-Accept; Xray's
+	// HTTPUpgrade sends raw bytes without it.
+	websocket := resp.Header.Get("Sec-Websocket-Accept") != ""
+	st := pipeUpgraded(&bufferedConn{Conn: client, r: cbrw.Reader}, &bufferedConn{Conn: conn, r: br}, s.cfg.StreamLinger, websocket)
 	s.log.Debug("upgrade closed", "route", rt.Prefix, "bytes_down", st.down, "down_end", errText(st.downErr),
-		"bytes_up", st.up, "up_end", errText(st.upErr), "ms", time.Since(start).Milliseconds())
+		"bytes_up", st.up, "up_end", errText(st.upErr), "close_frame", st.closeFrame, "ms", time.Since(start).Milliseconds())
 }
+
+// wsCloseWait is how long the relay waits for a WebSocket client to close
+// after the backend sent a close frame. The client closes once it has
+// received everything, which on a slow or shared link can take a while.
+const wsCloseWait = 5 * time.Minute
 
 type pipeStats struct {
 	up, down       int64
 	upErr, downErr error
+	closeFrame     bool
 }
 
 func errText(err error) string {
@@ -132,10 +141,11 @@ func errText(err error) string {
 // container closes first, and a socket closed with data still queued can be
 // reset by any late packet from the client:
 //  1. wait until the front end has acknowledged every byte sent;
-//  2. give the client up to linger to close by itself (WebSocket clients do
-//     so right after the backend's close frame, so this is usually instant);
+//  2. give the client time to close by itself: when the backend's last frame
+//     was a WebSocket close frame the client will close once it has received
+//     everything, so wait up to wsCloseWait; otherwise wait up to linger;
 //  3. send FIN, keep reading until the client closes, then close.
-func pipeUpgraded(client, backend net.Conn, linger time.Duration) pipeStats {
+func pipeUpgraded(client, backend net.Conn, linger time.Duration, websocket bool) pipeStats {
 	var st pipeStats
 	done := make(chan struct{})
 	go func() {
@@ -144,11 +154,22 @@ func pipeUpgraded(client, backend net.Conn, linger time.Duration) pipeStats {
 		closeWrite(backend)
 		_, _ = io.Copy(io.Discard, client) // keep reading so close() sends FIN, not RST
 	}()
-	st.down, st.downErr = copyBufErr(client, backend)
+	var dst io.Writer = client
+	var frames *wsFrameTracker
+	if websocket {
+		frames = &wsFrameTracker{w: client}
+		dst = frames
+	}
+	st.down, st.downErr = copyBufErr(dst, backend)
 	waitSendQueueEmpty(client, time.Minute)
+	wait := linger
+	if frames != nil && frames.CloseFrameSeen() {
+		st.closeFrame = true
+		wait = wsCloseWait
+	}
 	select {
 	case <-done:
-	case <-time.After(linger):
+	case <-time.After(wait):
 	}
 	closeWrite(client)
 	_ = client.SetReadDeadline(time.Now().Add(30 * time.Second))

@@ -37,7 +37,14 @@ CASES='20001 vless-grpc-gun          vless  "network":"grpc","grpcSettings":{"se
 20013 vless-httpupgrade       vless  "network":"httpupgrade","httpupgradeSettings":{"path":"/vh"} http/1.1'
 
 ins='' outs='' rules=''
-echo "$CASES" > /tmp/cases
+if [ "$TLS" = 1 ]; then
+    # Over TLS, Xray's XHTTP client ends up speaking HTTP/2 even with
+    # alpn=http/1.1 (seen against Cloud Run: "http2_handshake_failed"), so
+    # the HTTP/1.1 XHTTP cases only run in the local cleartext test.
+    echo "$CASES" | grep -v 'xhttp.*http/1.1$' > /tmp/cases
+else
+    echo "$CASES" > /tmp/cases
+fi
 while read -r port name proto net alpn; do
     ins="$ins{\"tag\":\"in-$port\",\"listen\":\"127.0.0.1\",\"port\":$port,\"protocol\":\"socks\",\"settings\":{\"udp\":false}},"
     outs="$outs{\"tag\":\"out-$port\",\"protocol\":\"$proto\",\"settings\":{$(user "$proto")},\"streamSettings\":{$net,$(sec "$alpn")}},"

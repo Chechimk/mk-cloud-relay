@@ -732,3 +732,38 @@ func TestResponseEndsWhileClientStillSending(t *testing.T) {
 		t.Fatalf("response took %v to end; the relay waited for the client", d)
 	}
 }
+
+// The backend sends data and closes at once: the tunnel client must receive
+// every byte followed by a clean end (the relay's end marker), not a cut.
+func TestTunnelBackendClosesFirst(t *testing.T) {
+	payload := randBytes(8 << 20)
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { c.Write(payload); c.Close() }()
+		}
+	}()
+	r := startRelay(t, map[string]string{"ROUTES": "/t/dl=tunnel://" + ln.Addr().String(), "TUNNEL_TOKENS": testToken})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cl, err := client.Listen(client.Options{Listen: "127.0.0.1:0", URL: "ws://" + r + "/t/dl", Token: testToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go client.Serve(ctx, cl, client.Options{URL: "ws://" + r + "/t/dl", Token: testToken}, quiet)
+	c, err := net.Dial("tcp", cl.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(30 * time.Second))
+	got, err := io.ReadAll(c)
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("got %d of %d bytes, err %v", len(got), len(payload), err)
+	}
+}

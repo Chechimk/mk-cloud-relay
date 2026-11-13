@@ -55,10 +55,71 @@ func (s *Server) tunnelHandler(rt *route) http.Handler {
 		s.tunnels.Add(1)
 		defer s.tunnels.Add(-1)
 		start := time.Now()
-		up, down := ServeWebSocketPipe(context.Background(), c, backend, s.cfg.WSPingInterval)
+		up, down := serveTunnel(c, backend, s.cfg.WSPingInterval)
 		s.log.Debug("tunnel closed", "route", rt.Prefix, "bytes_up", up, "bytes_down", down,
 			"seconds", int(time.Since(start).Seconds()))
 	})
+}
+
+// TunnelEOF is the text message the relay sends after the last byte from the
+// backend. Data travels in binary messages, so the marker cannot be confused
+// with data; the client closes once it reads it, which tells the relay that
+// everything was delivered.
+const TunnelEOF = "mk-cloud-relay:eof"
+
+// serveTunnel is the relay side of a tunnel. When the backend finishes, the
+// relay sends TunnelEOF and waits for the client to close instead of closing
+// first: Cloud Run's front end drops data it has not delivered yet when the
+// container closes first, and a WebSocket close handshake times out after a
+// few seconds, which a busy link can exceed.
+func serveTunnel(c *websocket.Conn, tcp net.Conn, ping time.Duration) (up, down int64) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.SetReadLimit(4 << 20)
+	ws := websocket.NetConn(ctx, c, websocket.MessageBinary)
+	startPings(ctx, c, ping, func() { cancel(); ws.Close(); tcp.Close() })
+	upDone := make(chan struct{})
+	go func() {
+		defer close(upDone)
+		up = copyBuf(tcp, ws) // ends when the client closes
+		closeWrite(tcp)
+	}()
+	down = copyBuf(ws, tcp) // ends when the backend closes
+	wctx, wcancel := context.WithTimeout(ctx, 30*time.Second)
+	_ = c.Write(wctx, websocket.MessageText, []byte(TunnelEOF))
+	wcancel()
+	select {
+	case <-upDone:
+	case <-time.After(wsCloseWait):
+	}
+	_ = c.Close(websocket.StatusNormalClosure, "")
+	tcp.Close()
+	<-upDone
+	return up, down
+}
+
+func startPings(ctx context.Context, c *websocket.Conn, every time.Duration, onFail func()) {
+	if every <= 0 {
+		return
+	}
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				pctx, pcancel := context.WithTimeout(ctx, 15*time.Second)
+				err := c.Ping(pctx)
+				pcancel()
+				if err != nil {
+					onFail()
+					return
+				}
+			}
+		}
+	}()
 }
 
 func tokenOK(r *http.Request, tokens []string) bool {
@@ -76,36 +137,18 @@ func tokenOK(r *http.Request, tokens []string) bool {
 	return ok == 1
 }
 
-// ServeWebSocketPipe copies bytes between a WebSocket and a TCP connection
-// until either side closes, sending WebSocket pings to keep idle mobile and
-// NAT paths open. It returns the bytes sent to the backend and to the client.
+// ServeWebSocketPipe is the client side of a tunnel: it copies bytes between
+// the WebSocket and a local TCP connection until either side finishes,
+// sending pings to keep idle mobile and NAT paths open. Reading the relay's
+// TunnelEOF text message ends the WebSocket-to-TCP direction (after all data
+// has been written), which closes both sides and so tells the relay that
+// everything arrived. It returns the bytes sent to the relay and received.
 func ServeWebSocketPipe(ctx context.Context, c *websocket.Conn, tcp net.Conn, ping time.Duration) (int64, int64) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	c.SetReadLimit(4 << 20)
 	ws := websocket.NetConn(ctx, c, websocket.MessageBinary)
-	if ping > 0 {
-		go func() {
-			t := time.NewTicker(ping)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					pctx, pcancel := context.WithTimeout(ctx, 15*time.Second)
-					err := c.Ping(pctx)
-					pcancel()
-					if err != nil {
-						cancel()
-						ws.Close()
-						tcp.Close()
-						return
-					}
-				}
-			}
-		}()
-	}
+	startPings(ctx, c, ping, func() { cancel(); ws.Close(); tcp.Close() })
 	// A WebSocket has no half-close, so the session ends when either side
 	// finishes.
 	return Pipe(ws, tcp, false)
