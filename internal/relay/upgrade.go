@@ -18,6 +18,10 @@ import (
 // FIN instead of a reset.
 const upgradeDrain = 30 * time.Second
 
+// upgradeLinger is how long an upgraded connection stays open toward the
+// client after the backend has finished, waiting for the client to close.
+var upgradeLinger = 10 * time.Second
+
 // serveUpgrade proxies WebSocket and HTTPUpgrade connections. It is used
 // instead of httputil.ReverseProxy's upgrade support so the end of a
 // connection can be handled gracefully: when the backend finishes, the
@@ -142,9 +146,11 @@ func pipeUpgraded(client, backend net.Conn) pipeStats {
 		_, _ = io.Copy(io.Discard, client) // keep reading so close() sends FIN, not RST
 	}()
 	st.down, st.downErr = copyBufErr(client, backend)
-	closeWrite(client)
-	_ = client.SetReadDeadline(time.Now().Add(upgradeDrain))
+	// Do not close toward the client yet: wait until the client closes
+	// (it has then received everything) or the linger time ends.
+	_ = client.SetReadDeadline(time.Now().Add(upgradeLinger))
 	<-done
+	closeWrite(client)
 	client.Close()
 	backend.Close()
 	return st
