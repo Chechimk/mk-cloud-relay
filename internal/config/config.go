@@ -62,6 +62,7 @@ type Config struct {
 	BackendIdleTimeout time.Duration
 	TCPKeepAlive       time.Duration
 	WSPingInterval     time.Duration
+	StreamLinger       time.Duration
 	MaxConcurrentH2    uint32
 	LogLevel           string
 	LogRequests        bool
@@ -88,6 +89,7 @@ func FromEnv(get func(string) string) (*Config, error) {
 		{&c.BackendIdleTimeout, "BACKEND_IDLE_TIMEOUT", 90 * time.Second},
 		{&c.TCPKeepAlive, "TCP_KEEPALIVE", 30 * time.Second},
 		{&c.WSPingInterval, "WS_PING_INTERVAL", 25 * time.Second},
+		{&c.StreamLinger, "STREAM_LINGER", 10 * time.Second},
 	}
 	for _, d := range durations {
 		if *d.dst, err = duration(get(d.key), d.def); err != nil {

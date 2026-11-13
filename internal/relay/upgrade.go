@@ -13,15 +13,6 @@ import (
 	"time"
 )
 
-// upgradeDrain is how long the relay keeps reading from the client after the
-// backend has finished an upgraded connection, so the connection ends with a
-// FIN instead of a reset.
-const upgradeDrain = 30 * time.Second
-
-// upgradeLinger is how long an upgraded connection stays open toward the
-// client after the backend has finished, waiting for the client to close.
-var upgradeLinger = 10 * time.Second
-
 // serveUpgrade proxies WebSocket and HTTPUpgrade connections. It is used
 // instead of httputil.ReverseProxy's upgrade support so the end of a
 // connection can be handled gracefully: when the backend finishes, the
@@ -116,7 +107,7 @@ func (s *Server) serveUpgrade(w http.ResponseWriter, r *http.Request, rt *route,
 		return
 	}
 	start := time.Now()
-	st := pipeUpgraded(&bufferedConn{Conn: client, r: cbrw.Reader}, &bufferedConn{Conn: conn, r: br})
+	st := pipeUpgraded(&bufferedConn{Conn: client, r: cbrw.Reader}, &bufferedConn{Conn: conn, r: br}, s.cfg.StreamLinger)
 	s.log.Debug("upgrade closed", "route", rt.Prefix, "bytes_down", st.down, "down_end", errText(st.downErr),
 		"bytes_up", st.up, "up_end", errText(st.upErr), "ms", time.Since(start).Milliseconds())
 }
@@ -133,10 +124,14 @@ func errText(err error) string {
 	return err.Error()
 }
 
-// pipeUpgraded copies both ways. When the backend finishes, the client gets
-// a half-close and is drained for up to upgradeDrain before the socket is
-// closed; when the client finishes first, the backend gets a half-close.
-func pipeUpgraded(client, backend net.Conn) pipeStats {
+// pipeUpgraded copies both ways. When the client finishes first, the backend
+// gets a half-close. When the backend finishes first, the connection to the
+// client stays open (reading and discarding) until the client closes or
+// linger passes, and only then ends with a FIN: Cloud Run's front end drops
+// data it has not yet delivered if the container closes first. WebSocket
+// clients close right after the backend's close frame, so this normally
+// adds no delay.
+func pipeUpgraded(client, backend net.Conn, linger time.Duration) pipeStats {
 	var st pipeStats
 	done := make(chan struct{})
 	go func() {
@@ -148,7 +143,7 @@ func pipeUpgraded(client, backend net.Conn) pipeStats {
 	st.down, st.downErr = copyBufErr(client, backend)
 	// Do not close toward the client yet: wait until the client closes
 	// (it has then received everything) or the linger time ends.
-	_ = client.SetReadDeadline(time.Now().Add(upgradeLinger))
+	_ = client.SetReadDeadline(time.Now().Add(linger))
 	<-done
 	closeWrite(client)
 	client.Close()

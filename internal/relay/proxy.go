@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Chechimk/mk-cloud-relay/internal/config"
@@ -82,8 +83,68 @@ func (s *Server) reverseProxy(rt *route) http.Handler {
 			s.serveUpgrade(w, r, rt, scheme, tlsConf)
 			return
 		}
+		body := &lingerBody{rc: r.Body}
+		r.Body = body
 		rp.ServeHTTP(w, r)
+		body.linger(s.cfg.StreamLinger)
 	})
+}
+
+// lingerBody wraps the client's request body. The transport closes the body
+// when the backend finishes, but closing an HTTP/2 stream that the client is
+// still sending on makes Go send RST_STREAM, and Cloud Run's front end then
+// drops response data it has not delivered yet. So Close only marks the body
+// closed, and linger waits (up to a limit) for the client to finish sending
+// before the handler returns.
+type lingerBody struct {
+	rc     io.ReadCloser
+	mu     sync.Mutex // serializes reads of rc
+	closed atomic.Bool
+	done   atomic.Bool // rc returned EOF or an error
+}
+
+func (b *lingerBody) Read(p []byte) (int, error) {
+	if b.closed.Load() {
+		return 0, io.EOF
+	}
+	return b.read(p)
+}
+
+func (b *lingerBody) read(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n, err := b.rc.Read(p)
+	if err != nil {
+		b.done.Store(true)
+	}
+	return n, err
+}
+
+func (b *lingerBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+func (b *lingerBody) linger(max time.Duration) {
+	if b.done.Load() || max <= 0 || b.rc == http.NoBody {
+		_ = b.rc.Close()
+		return
+	}
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		buf := make([]byte, 16<<10)
+		for {
+			if _, err := b.read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-finished:
+	case <-time.After(max):
+	}
+	_ = b.rc.Close()
 }
 
 // applyRoute points out at the route's backend: same path and query (unless
