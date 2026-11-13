@@ -1,0 +1,33 @@
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    { "listen": "127.0.0.1", "port": 10001, "protocol": "vless",
+      "settings": { "clients": [{ "id": "__UUID__" }], "decryption": "none" },
+      "streamSettings": { "network": "grpc", "grpcSettings": { "serviceName": "vg" } } },
+    { "listen": "127.0.0.1", "port": 10002, "protocol": "vmess",
+      "settings": { "clients": [{ "id": "__UUID__" }] },
+      "streamSettings": { "network": "grpc", "grpcSettings": { "serviceName": "mg" } } },
+    { "listen": "127.0.0.1", "port": 10003, "protocol": "vless",
+      "settings": { "clients": [{ "id": "__UUID__" }], "decryption": "none" },
+      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "/vx", "mode": "auto" } } },
+    { "listen": "127.0.0.1", "port": 10004, "protocol": "vless",
+      "settings": { "clients": [{ "id": "__UUID__" }], "decryption": "none" },
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "/vw" } } },
+    { "listen": "127.0.0.1", "port": 10005, "protocol": "vmess",
+      "settings": { "clients": [{ "id": "__UUID__" }] },
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "/mw" } } },
+    { "listen": "127.0.0.1", "port": 10006, "protocol": "trojan",
+      "settings": { "clients": [{ "password": "__SECRET__" }] },
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "/tw" } } },
+    { "listen": "127.0.0.1", "port": 10007, "protocol": "vless",
+      "settings": { "clients": [{ "id": "__UUID__" }], "decryption": "none" },
+      "streamSettings": { "network": "httpupgrade", "httpupgradeSettings": { "path": "/vh" } } },
+    { "listen": "127.0.0.1", "port": 10008, "protocol": "trojan",
+      "settings": { "clients": [{ "password": "__SECRET__" }] },
+      "streamSettings": { "network": "grpc", "grpcSettings": { "serviceName": "tg" } } },
+    { "listen": "127.0.0.1", "port": 3128, "protocol": "http",
+      "settings": { "accounts": [{ "user": "e2e", "pass": "__SECRET__" }] } }
+  ],
+  "outbounds": [{ "protocol": "freedom", "settings": {
+      "finalRules": [{ "action": "allow", "network": "tcp", "ip": ["127.0.0.1/32"], "port": "8000" }] } }]
+}
